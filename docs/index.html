@@ -1,10 +1,214 @@
 <!doctype html>
+<html lang="en">
+<head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Defense vs position (PIR)</title>
-<body style="font:16px system-ui;max-width:40rem;margin:3rem auto;padding:0 1rem">
-<h1>Almost there</h1>
-<p>The table appears here after the first automatic run finishes.
-Open the repository's <b>Actions</b> tab, choose <b>Update defense-vs-position page</b>
-and press <b>Run workflow</b>. Refresh this page after about 3 minutes.</p>
+<title>Defense vs Position (PIR)</title>
+<style>
+:root{
+  color-scheme: light dark;
+  --bg:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#6f6d68;
+  --line:#e1e0d9; --mid:#f0efec; --cool:#2a78d6; --warm:#e34948; --accent:#2a78d6;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --bg:#0d0d0d; --surface:#1a1a19; --ink:#f0efec; --ink2:#c3c2b7; --muted:#a09e96;
+         --line:#2c2c2a; --mid:#383835; --cool:#3987e5; --warm:#e66767; --accent:#3987e5; }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:980px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:22px;margin:0 0 4px;letter-spacing:-.01em}
+.sub{color:var(--ink2);margin:0 0 16px}
+.how{color:var(--ink2);margin:0 0 18px;max-width:70ch}
+.controls{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;margin:0 0 12px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--surface)}
+.seg button{border:0;background:transparent;color:var(--ink2);padding:8px 12px;font:inherit;cursor:pointer}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button[aria-pressed="true"]{background:var(--accent);color:#fff}
+.seg button:focus-visible,input:focus-visible,th button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+input[type=search]{border:1px solid var(--line);background:var(--surface);color:var(--ink);
+  border-radius:8px;padding:8px 10px;font:inherit;min-width:180px}
+.legend{display:flex;align-items:center;gap:8px;color:var(--ink2);font-size:13px;margin:0 0 10px}
+.bar{height:10px;width:160px;border-radius:5px;border:1px solid var(--line);
+  background:linear-gradient(90deg,
+    color-mix(in srgb,var(--cool) 55%,var(--mid)),var(--mid),color-mix(in srgb,var(--warm) 55%,var(--mid)))}
+.tablewrap{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:10px}
+table{border-collapse:separate;border-spacing:0;width:100%;min-width:640px}
+th,td{padding:8px 10px;text-align:center;border-bottom:1px solid var(--line)}
+th{font-weight:600;color:var(--ink2);background:var(--surface);position:sticky;top:0}
+th button{all:unset;cursor:pointer;display:inline-block;padding:2px 4px}
+th:first-child,td:first-child{text-align:left;position:sticky;left:0;background:var(--surface);z-index:1;min-width:190px}
+tr:last-child td{border-bottom:0}
+td.v{font-variant-numeric:tabular-nums}
+td.v b{display:block;font-size:16px;font-weight:600}
+td.v small{display:block;color:var(--ink2);font-size:12px;white-space:nowrap}
+td.thin{opacity:.6}
+td.all{border-left:2px solid var(--line)}
+summary{cursor:pointer;color:var(--ink2);font-weight:600;margin:0 0 10px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;margin:0 0 20px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.card h3{margin:0 0 6px;font-size:14px;color:var(--ink2);font-weight:600}
+.card ol{margin:0;padding-left:20px}
+.card li{display:flex;justify-content:space-between;gap:8px}
+.card li span:last-child{font-variant-numeric:tabular-nums;color:var(--ink2)}
+.card p{margin:0;color:var(--muted);font-size:13px}
+.note{color:var(--ink2);font-size:13px;max-width:78ch}
+footer{margin-top:20px;color:var(--muted);font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Defense vs position, in PIR</h1>
+  <p class="sub" id="meta"></p>
+  <p class="how">Each cell shows the average PIR that opposing <b>guards, forwards and centers</b> produce
+  <b>against</b> that team. <b>Red = more than the league average (softer defense), blue = less (tougher).</b>
+  Click a column title to sort.</p>
+
+  <details id="cardsbox" open>
+    <summary>Softest and toughest teams by position</summary>
+    <div class="cards" id="cards"></div>
+  </details>
+
+  <div class="controls">
+    <div class="seg" role="group" aria-label="Metric" id="metric">
+      <button data-m="avg" aria-pressed="true">Avg PIR</button>
+      <button data-m="per36" aria-pressed="false">PIR per 36 min</button>
+      <button data-m="vs" aria-pressed="false">vs league %</button>
+    </div>
+    <input type="search" id="q" placeholder="Filter teams" aria-label="Filter teams">
+  </div>
+  <div class="legend"><span>Tougher</span><span class="bar"></span><span>Softer</span>
+    <span>· faded cells = few games so far (†)</span></div>
+  <div class="tablewrap"><table id="tbl"></table></div>
+  <noscript><p>This page needs JavaScript to draw the table.</p></noscript>
+
+  <p class="note" id="explain"></p>
+  <footer id="foot"></footer>
+</div>
+<script id="data" type="application/json">{"positions": ["Guard", "Forward", "Center"], "min_n": 15, "rows": [{"team": "ZALGIRIS KAUNAS", "pos": "Center", "games": 5, "n": 10, "avg": 4.6, "per36": 10.35, "avg_vs": -50.3, "per36_vs": -48.1, "rank": 1}, {"team": "PANATHINAIKOS AKTOR ATHENS", "pos": "Center", "games": 5, "n": 12, "avg": 5.73, "per36": 13.56, "avg_vs": -38.1, "per36_vs": -32.1, "rank": 2}, {"team": "OLYMPIACOS PIRAEUS", "pos": "Center", "games": 5, "n": 10, "avg": 6.63, "per36": 15.97, "avg_vs": -28.4, "per36_vs": -20.0, "rank": 3}, {"team": "ANADOLU EFES ISTANBUL", "pos": "Center", "games": 5, "n": 11, "avg": 6.8, "per36": 14.16, "avg_vs": -26.6, "per36_vs": -29.0, "rank": 4}, {"team": "VIRTUS BOLOGNA", "pos": "Center", "games": 5, "n": 12, "avg": 7.83, "per36": 19.03, "avg_vs": -15.4, "per36_vs": -4.7, "rank": 5}, {"team": "REAL MADRID", "pos": "Center", "games": 5, "n": 13, "avg": 8.57, "per36": 17.06, "avg_vs": -7.5, "per36_vs": -14.5, "rank": 6}, {"team": "MACCABI RAPYD TEL AVIV", "pos": "Center", "games": 5, "n": 8, "avg": 8.8, "per36": 17.6, "avg_vs": -5.0, "per36_vs": -11.8, "rank": 7}, {"team": "CRVENA ZVEZDA MERIDIANBET BELGRADE", "pos": "Center", "games": 5, "n": 9, "avg": 8.9, "per36": 17.57, "avg_vs": -3.9, "per36_vs": -12.0, "rank": 8}, {"team": "VALENCIA BASKET", "pos": "Center", "games": 5, "n": 10, "avg": 9.37, "per36": 18.87, "avg_vs": 1.1, "per36_vs": -5.5, "rank": 9}, {"team": "BESIKTAS ISTANBUL", "pos": "Center", "games": 5, "n": 10, "avg": 9.5, "per36": 20.77, "avg_vs": 2.6, "per36_vs": 4.1, "rank": 10}, {"team": "PARTIZAN MOZZART BET BELGRADE", "pos": "Center", "games": 5, "n": 11, "avg": 9.5, "per36": 18.15, "avg_vs": 2.6, "per36_vs": -9.0, "rank": 10}, {"team": "FC BARCELONA", "pos": "Center", "games": 5, "n": 11, "avg": 9.8, "per36": 22.81, "avg_vs": 5.8, "per36_vs": 14.3, "rank": 12}, {"team": "FENERBAHCE TARFIN ISTANBUL", "pos": "Center", "games": 5, "n": 12, "avg": 10.23, "per36": 21.1, "avg_vs": 10.5, "per36_vs": 5.7, "rank": 13}, {"team": "ARMANI OLIMPIA MILAN", "pos": "Center", "games": 5, "n": 13, "avg": 10.5, "per36": 21.89, "avg_vs": 13.4, "per36_vs": 9.7, "rank": 14}, {"team": "DUBAI BASKETBALL", "pos": "Center", "games": 5, "n": 10, "avg": 10.8, "per36": 22.53, "avg_vs": 16.6, "per36_vs": 12.9, "rank": 15}, {"team": "FC BAYERN MUNICH", "pos": "Center", "games": 5, "n": 15, "avg": 10.95, "per36": 25.39, "avg_vs": 18.2, "per36_vs": 27.2, "rank": 16}, {"team": "LDLC ASVEL VILLEURBANNE", "pos": "Center", "games": 5, "n": 9, "avg": 11.13, "per36": 24.22, "avg_vs": 20.2, "per36_vs": 21.4, "rank": 17}, {"team": "HAPOEL IBI TEL AVIV", "pos": "Center", "games": 5, "n": 11, "avg": 11.33, "per36": 24.75, "avg_vs": 22.4, "per36_vs": 24.0, "rank": 18}, {"team": "KOSNER BASKONIA VITORIA-GASTEIZ", "pos": "Center", "games": 5, "n": 11, "avg": 12.1, "per36": 26.14, "avg_vs": 30.6, "per36_vs": 31.0, "rank": 19}, {"team": "PARIS BASKETBALL", "pos": "Center", "games": 5, "n": 11, "avg": 12.15, "per36": 25.43, "avg_vs": 31.2, "per36_vs": 27.4, "rank": 20}, {"team": "REAL MADRID", "pos": "Forward", "games": 5, "n": 17, "avg": 4.78, "per36": 12.17, "avg_vs": -36.7, "per36_vs": -21.8, "rank": 1}, {"team": "FENERBAHCE TARFIN ISTANBUL", "pos": "Forward", "games": 5, "n": 24, "avg": 4.99, "per36": 10.36, "avg_vs": -34.0, "per36_vs": -33.5, "rank": 2}, {"team": "PANATHINAIKOS AKTOR ATHENS", "pos": "Forward", "games": 5, "n": 24, "avg": 5.31, "per36": 11.58, "avg_vs": -29.8, "per36_vs": -25.6, "rank": 3}, {"team": "ARMANI OLIMPIA MILAN", "pos": "Forward", "games": 5, "n": 20, "avg": 6.11, "per36": 15.24, "avg_vs": -19.2, "per36_vs": -2.1, "rank": 4}, {"team": "DUBAI BASKETBALL", "pos": "Forward", "games": 5, "n": 22, "avg": 6.16, "per36": 12.03, "avg_vs": -18.4, "per36_vs": -22.7, "rank": 5}, {"team": "HAPOEL IBI TEL AVIV", "pos": "Forward", "games": 5, "n": 22, "avg": 6.72, "per36": 13.08, "avg_vs": -11.1, "per36_vs": -16.0, "rank": 6}, {"team": "OLYMPIACOS PIRAEUS", "pos": "Forward", "games": 5, "n": 20, "avg": 6.96, "per36": 14.85, "avg_vs": -7.9, "per36_vs": -4.6, "rank": 7}, {"team": "ANADOLU EFES ISTANBUL", "pos": "Forward", "games": 5, "n": 22, "avg": 7.12, "per36": 13.65, "avg_vs": -5.8, "per36_vs": -12.3, "rank": 8}, {"team": "VALENCIA BASKET", "pos": "Forward", "games": 5, "n": 21, "avg": 7.13, "per36": 14.07, "avg_vs": -5.6, "per36_vs": -9.6, "rank": 9}, {"team": "PARTIZAN MOZZART BET BELGRADE", "pos": "Forward", "games": 5, "n": 20, "avg": 7.14, "per36": 15.72, "avg_vs": -5.5, "per36_vs": 1.0, "rank": 10}, {"team": "FC BAYERN MUNICH", "pos": "Forward", "games": 5, "n": 17, "avg": 7.6, "per36": 15.65, "avg_vs": 0.6, "per36_vs": 0.5, "rank": 11}, {"team": "FC BARCELONA", "pos": "Forward", "games": 5, "n": 24, "avg": 7.92, "per36": 15.74, "avg_vs": 4.8, "per36_vs": 1.1, "rank": 12}, {"team": "CRVENA ZVEZDA MERIDIANBET BELGRADE", "pos": "Forward", "games": 5, "n": 21, "avg": 8.19, "per36": 15.72, "avg_vs": 8.4, "per36_vs": 1.0, "rank": 13}, {"team": "ZALGIRIS KAUNAS", "pos": "Forward", "games": 5, "n": 22, "avg": 8.47, "per36": 17.61, "avg_vs": 12.1, "per36_vs": 13.1, "rank": 14}, {"team": "KOSNER BASKONIA VITORIA-GASTEIZ", "pos": "Forward", "games": 5, "n": 21, "avg": 8.74, "per36": 19.58, "avg_vs": 15.7, "per36_vs": 25.8, "rank": 15}, {"team": "PARIS BASKETBALL", "pos": "Forward", "games": 5, "n": 22, "avg": 8.78, "per36": 17.38, "avg_vs": 16.2, "per36_vs": 11.6, "rank": 16}, {"team": "BESIKTAS ISTANBUL", "pos": "Forward", "games": 5, "n": 19, "avg": 8.95, "per36": 16.66, "avg_vs": 18.4, "per36_vs": 7.0, "rank": 17}, {"team": "MACCABI RAPYD TEL AVIV", "pos": "Forward", "games": 5, "n": 22, "avg": 9.43, "per36": 19.45, "avg_vs": 24.8, "per36_vs": 25.0, "rank": 18}, {"team": "VIRTUS BOLOGNA", "pos": "Forward", "games": 5, "n": 18, "avg": 10.2, "per36": 20.15, "avg_vs": 35.0, "per36_vs": 29.4, "rank": 19}, {"team": "LDLC ASVEL VILLEURBANNE", "pos": "Forward", "games": 5, "n": 23, "avg": 10.44, "per36": 20.85, "avg_vs": 38.2, "per36_vs": 34.0, "rank": 20}, {"team": "PANATHINAIKOS AKTOR ATHENS", "pos": "Guard", "games": 5, "n": 23, "avg": 4.73, "per36": 9.25, "avg_vs": -43.0, "per36_vs": -42.1, "rank": 1}, {"team": "FENERBAHCE TARFIN ISTANBUL", "pos": "Guard", "games": 5, "n": 23, "avg": 6.18, "per36": 13.16, "avg_vs": -25.6, "per36_vs": -17.6, "rank": 2}, {"team": "CRVENA ZVEZDA MERIDIANBET BELGRADE", "pos": "Guard", "games": 5, "n": 25, "avg": 6.49, "per36": 12.98, "avg_vs": -21.8, "per36_vs": -18.7, "rank": 3}, {"team": "LDLC ASVEL VILLEURBANNE", "pos": "Guard", "games": 5, "n": 27, "avg": 6.55, "per36": 13.94, "avg_vs": -21.1, "per36_vs": -12.7, "rank": 4}, {"team": "PARTIZAN MOZZART BET BELGRADE", "pos": "Guard", "games": 5, "n": 26, "avg": 6.8, "per36": 13.24, "avg_vs": -18.1, "per36_vs": -17.1, "rank": 5}, {"team": "HAPOEL IBI TEL AVIV", "pos": "Guard", "games": 5, "n": 26, "avg": 6.8, "per36": 14.42, "avg_vs": -18.0, "per36_vs": -9.7, "rank": 6}, {"team": "OLYMPIACOS PIRAEUS", "pos": "Guard", "games": 5, "n": 29, "avg": 7.32, "per36": 15.12, "avg_vs": -11.9, "per36_vs": -5.3, "rank": 7}, {"team": "VIRTUS BOLOGNA", "pos": "Guard", "games": 5, "n": 25, "avg": 7.67, "per36": 13.85, "avg_vs": -7.6, "per36_vs": -13.2, "rank": 8}, {"team": "DUBAI BASKETBALL", "pos": "Guard", "games": 5, "n": 23, "avg": 7.69, "per36": 13.62, "avg_vs": -7.4, "per36_vs": -14.7, "rank": 9}, {"team": "MACCABI RAPYD TEL AVIV", "pos": "Guard", "games": 5, "n": 26, "avg": 7.75, "per36": 15.47, "avg_vs": -6.7, "per36_vs": -3.1, "rank": 10}, {"team": "ZALGIRIS KAUNAS", "pos": "Guard", "games": 5, "n": 26, "avg": 8.15, "per36": 16.2, "avg_vs": -1.8, "per36_vs": 1.5, "rank": 11}, {"team": "FC BARCELONA", "pos": "Guard", "games": 5, "n": 22, "avg": 8.41, "per36": 15.81, "avg_vs": 1.3, "per36_vs": -0.9, "rank": 12}, {"team": "FC BAYERN MUNICH", "pos": "Guard", "games": 5, "n": 25, "avg": 9.6, "per36": 17.53, "avg_vs": 15.7, "per36_vs": 9.8, "rank": 13}, {"team": "KOSNER BASKONIA VITORIA-GASTEIZ", "pos": "Guard", "games": 5, "n": 25, "avg": 9.87, "per36": 17.78, "avg_vs": 18.9, "per36_vs": 11.4, "rank": 14}, {"team": "VALENCIA BASKET", "pos": "Guard", "games": 5, "n": 27, "avg": 9.9, "per36": 18.2, "avg_vs": 19.2, "per36_vs": 14.0, "rank": 15}, {"team": "PARIS BASKETBALL", "pos": "Guard", "games": 5, "n": 23, "avg": 10.12, "per36": 18.79, "avg_vs": 21.9, "per36_vs": 17.7, "rank": 16}, {"team": "REAL MADRID", "pos": "Guard", "games": 5, "n": 25, "avg": 10.15, "per36": 17.38, "avg_vs": 22.3, "per36_vs": 8.9, "rank": 17}, {"team": "BESIKTAS ISTANBUL", "pos": "Guard", "games": 5, "n": 26, "avg": 10.3, "per36": 19.35, "avg_vs": 24.1, "per36_vs": 21.3, "rank": 18}, {"team": "ANADOLU EFES ISTANBUL", "pos": "Guard", "games": 5, "n": 25, "avg": 10.41, "per36": 20.95, "avg_vs": 25.4, "per36_vs": 31.2, "rank": 19}, {"team": "ARMANI OLIMPIA MILAN", "pos": "Guard", "games": 5, "n": 26, "avg": 11.14, "per36": 20.56, "avg_vs": 34.2, "per36_vs": 28.8, "rank": 20}], "overall": [{"team": "ANADOLU EFES ISTANBUL", "n": 58, "avg": 8.09, "per36": 16.88, "avg_vs": 0.43, "per36_vs": 2.18}, {"team": "ARMANI OLIMPIA MILAN", "n": 59, "avg": 9.08, "per36": 19.3, "avg_vs": 12.83, "per36_vs": 16.77}, {"team": "BESIKTAS ISTANBUL", "n": 55, "avg": 9.4, "per36": 18.61, "avg_vs": 16.75, "per36_vs": 12.64}, {"team": "CRVENA ZVEZDA MERIDIANBET BELGRADE", "n": 55, "avg": 7.47, "per36": 14.8, "avg_vs": -7.19, "per36_vs": -10.46}, {"team": "DUBAI BASKETBALL", "n": 55, "avg": 7.29, "per36": 14.44, "avg_vs": -9.45, "per36_vs": -12.64}, {"team": "FC BARCELONA", "n": 57, "avg": 8.25, "per36": 16.92, "avg_vs": 2.41, "per36_vs": 2.4}, {"team": "FC BAYERN MUNICH", "n": 57, "avg": 9.11, "per36": 18.68, "avg_vs": 13.09, "per36_vs": 13.07}, {"team": "FENERBAHCE TARFIN ISTANBUL", "n": 59, "avg": 6.41, "per36": 13.61, "avg_vs": -20.43, "per36_vs": -17.65}, {"team": "HAPOEL IBI TEL AVIV", "n": 59, "avg": 7.44, "per36": 15.8, "avg_vs": -7.59, "per36_vs": -4.36}, {"team": "KOSNER BASKONIA VITORIA-GASTEIZ", "n": 57, "avg": 9.68, "per36": 19.87, "avg_vs": 20.28, "per36_vs": 20.26}, {"team": "LDLC ASVEL VILLEURBANNE", "n": 59, "avg": 8.58, "per36": 18.22, "avg_vs": 6.52, "per36_vs": 10.24}, {"team": "MACCABI RAPYD TEL AVIV", "n": 56, "avg": 8.61, "per36": 17.35, "avg_vs": 6.9, "per36_vs": 5.01}, {"team": "OLYMPIACOS PIRAEUS", "n": 59, "avg": 7.32, "per36": 15.17, "avg_vs": -9.06, "per36_vs": -8.18}, {"team": "PANATHINAIKOS AKTOR ATHENS", "n": 59, "avg": 5.15, "per36": 10.94, "avg_vs": -36.01, "per36_vs": -33.77}, {"team": "PARIS BASKETBALL", "n": 56, "avg": 9.62, "per36": 19.4, "avg_vs": 19.54, "per36_vs": 17.43}, {"team": "PARTIZAN MOZZART BET BELGRADE", "n": 57, "avg": 7.33, "per36": 15.05, "avg_vs": -8.92, "per36_vs": -8.93}, {"team": "REAL MADRID", "n": 55, "avg": 8.07, "per36": 15.98, "avg_vs": 0.26, "per36_vs": -3.27}, {"team": "VALENCIA BASKET", "n": 58, "avg": 8.26, "per36": 16.82, "avg_vs": 2.57, "per36_vs": 1.81}, {"team": "VIRTUS BOLOGNA", "n": 55, "avg": 8.51, "per36": 16.85, "avg_vs": 5.68, "per36_vs": 1.96}, {"team": "ZALGIRIS KAUNAS", "n": 58, "avg": 7.57, "per36": 15.8, "avg_vs": -5.99, "per36_vs": -4.36}], "meta": {"season_label": "Euroleague 2026-27", "games": 50, "latest_round": 5, "updated_iso": "2026-10-15T09:03:22+00:00", "inferred_pct": 0.0, "none_pct": 0.0}}</script>
+<script>
+const D = JSON.parse(document.getElementById("data").textContent);
+const POS = D.positions, MIN_N = D.min_n;
+const cell = {}, over = {};
+D.rows.forEach(r => { (cell[r.team] = cell[r.team] || {})[r.pos] = r; });
+D.overall.forEach(r => { over[r.team] = r; });
+const TEAMS = Object.keys(over).sort();
+const METRICS = {
+  avg:  {val: r => r.avg,    vs: r => r.avg_vs,   fmt: v => v.toFixed(1)},
+  per36:{val: r => r.per36,  vs: r => r.per36_vs, fmt: v => v.toFixed(1)},
+  vs:   {val: r => r.avg_vs, vs: r => r.avg_vs,   fmt: v => (v > 0 ? "+" : "") + v.toFixed(1) + "%"}
+};
+const signed = v => v == null ? "–" : (v > 0 ? "+" : "") + v.toFixed(1) + "%";
+let metric = "avg", sortKey = "All", sortDir = -1, query = "";
+
+function entry(team, key) { return key === "All" ? over[team] : (cell[team] || {})[key]; }
+
+function tint(vsPct) {
+  if (vsPct == null) return "";
+  const pole = vsPct > 0 ? "var(--warm)" : "var(--cool)";
+  const k = Math.round(Math.min(Math.abs(vsPct) / 40, 1) * 55);
+  return "color-mix(in srgb," + pole + " " + k + "%,var(--mid))";
+}
+
+function drawCards() {
+  const host = document.getElementById("cards"); host.innerHTML = "";
+  POS.forEach(pos => {
+    const rows = D.rows.filter(r => r.pos === pos && r.n >= MIN_N && r.avg != null)
+                       .sort((a, b) => b.avg - a.avg);
+    const card = document.createElement("div"); card.className = "card";
+    const h = document.createElement("h3"); h.textContent = pos + "s: softest / toughest"; card.appendChild(h);
+    if (rows.length < 6) {
+      const p = document.createElement("p");
+      p.textContent = "Not enough games yet (needs " + MIN_N + "+ player-games per team).";
+      card.appendChild(p);
+    } else {
+      [["Softest", rows.slice(0, 3)], ["Toughest", rows.slice(-3).reverse()]].forEach(([lab, list]) => {
+        const t = document.createElement("h3"); t.textContent = lab; t.style.marginTop = "8px"; card.appendChild(t);
+        const ol = document.createElement("ol");
+        list.forEach(r => {
+          const li = document.createElement("li");
+          const a = document.createElement("span"); a.textContent = r.team;
+          const b = document.createElement("span"); b.textContent = r.avg.toFixed(1) + " (" + signed(r.avg_vs) + ")";
+          li.append(a, b); ol.appendChild(li);
+        });
+        card.appendChild(ol);
+      });
+    }
+    host.appendChild(card);
+  });
+}
+
+function drawTable() {
+  const m = METRICS[metric], tbl = document.getElementById("tbl");
+  tbl.innerHTML = "";
+  const cols = [["Team", "Team"]].concat(POS.map(p => [p, p]), [["All positions", "All"]]);
+  const thead = tbl.createTHead().insertRow();
+  cols.forEach(([label, key]) => {
+    const th = document.createElement("th");
+    th.setAttribute("aria-sort", key === sortKey ? (sortDir > 0 ? "ascending" : "descending") : "none");
+    const b = document.createElement("button");
+    b.textContent = label + (key === sortKey ? (sortDir > 0 ? " ▲" : " ▼") : "");
+    b.onclick = () => { if (sortKey === key) sortDir = -sortDir; else { sortKey = key; sortDir = key === "Team" ? 1 : -1; } drawTable(); };
+    th.appendChild(b); thead.appendChild(th);
+  });
+  const sortVal = t => {
+    if (sortKey === "Team") return t;
+    const e = entry(t, sortKey); const v = e ? m.val(e) : null;
+    return v == null ? null : v;
+  };
+  const list = TEAMS.filter(t => t.toLowerCase().includes(query.toLowerCase()));
+  list.sort((a, b) => {
+    const x = sortVal(a), y = sortVal(b);
+    if (x == null && y == null) return 0; if (x == null) return 1; if (y == null) return -1;
+    return (x < y ? -1 : x > y ? 1 : 0) * sortDir;
+  });
+  const tbody = tbl.createTBody();
+  list.forEach(team => {
+    const tr = tbody.insertRow();
+    tr.insertCell().textContent = team;
+    POS.concat(["All"]).forEach(key => {
+      const td = tr.insertCell(); td.className = "v" + (key === "All" ? " all" : "");
+      const e = entry(team, key);
+      if (!e || m.val(e) == null) { td.textContent = "–"; return; }
+      const thin = e.n < MIN_N; if (thin) td.classList.add("thin");
+      td.style.background = tint(m.vs(e));
+      const b = document.createElement("b"); b.textContent = m.fmt(m.val(e)) + (thin ? " †" : "");
+      const s = document.createElement("small");
+      s.textContent = metric === "vs" ? e.avg.toFixed(1) + " PIR · n " + e.n
+                                      : "n " + e.n + " · " + signed(m.vs(e));
+      td.append(b, s);
+      td.title = team + " vs " + (key === "All" ? "all positions" : key + "s") +
+        "\nAvg PIR " + (e.avg == null ? "–" : e.avg.toFixed(2)) +
+        " | per 36 min " + (e.per36 == null ? "–" : e.per36.toFixed(2)) +
+        "\nPlayer-games " + e.n + (e.games != null ? " in " + e.games + " games" : "") +
+        (e.rank != null ? "\nRank " + e.rank + " (1 = allows least PIR)" : "");
+    });
+  });
+}
+
+document.getElementById("meta").textContent =
+  D.meta.season_label + " · " + D.meta.games + " games" +
+  (D.meta.latest_round ? " · through round " + D.meta.latest_round : "") +
+  " · updated " + new Date(D.meta.updated_iso).toLocaleString([], {dateStyle: "medium", timeStyle: "short"});
+document.getElementById("explain").textContent =
+  "n = player-games behind the number; † = fewer than " + MIN_N + " (about 30+ is a comfortable base). " +
+  "Avg PIR: in every game the PIR of the opposing players of that position who played is averaged, " +
+  "then those game values are averaged, so each game counts once. PIR per 36 min weights players by " +
+  "minutes played. “vs league %” compares with the league average for that position. " +
+  "The opponent's own strength is not adjusted for.";
+document.getElementById("foot").textContent =
+  "Positions come from a fantasy player list" +
+  (D.meta.inferred_pct > 0 ? "; " + D.meta.inferred_pct.toFixed(1) + "% of minutes are from players whose position was estimated from their stats" : "") +
+  (D.meta.none_pct > 0 ? "; " + D.meta.none_pct.toFixed(1) + "% of minutes are from players without a position and are left out" : "") + ".";
+document.querySelectorAll("#metric button").forEach(b => b.onclick = () => {
+  metric = b.dataset.m;
+  document.querySelectorAll("#metric button").forEach(x => x.setAttribute("aria-pressed", x === b));
+  drawTable();
+});
+document.getElementById("q").oninput = e => { query = e.target.value; drawTable(); };
+if (window.innerWidth < 640) document.getElementById("cardsbox").open = false;
+drawCards(); drawTable();
+</script>
 </body>
+</html>
