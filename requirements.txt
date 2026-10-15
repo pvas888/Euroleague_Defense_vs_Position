@@ -1,0 +1,7 @@
+euroleague-api
+pandas
+numpy
+requests
+tqdm
+openpyxl
+scikit-learn
