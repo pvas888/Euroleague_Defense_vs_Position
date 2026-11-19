@@ -11,7 +11,8 @@ What this script does
      Forwards / Centers who played; then the average of those over all games.
      Lower = better defense against that position.
   5. Saves everything to an Excel workbook + CSVs and offers them for download.
-  6. Writes a self-contained web page (index.html) with the same tables.
+  6. Writes a self-contained web page (index.html) with the same tables, plus filters
+     for rounds and for the teams playing on each day of the next round.
 
 How to use in Colab
   - Paste the whole script into ONE cell and run it.
@@ -281,11 +282,32 @@ def download_season(season):
 
 
 NAME_COLS = ["Season", "Gamecode", "home_name", "away_name", "Round"]
+SCHEDULE_COLS = NAME_COLS + ["date", "time", "confirmed", "played"]
+
+
+def _parse_dates(series):
+    """Dates in the schedule come as text; try the usual formats, keep the best fit."""
+    import warnings
+    s = series.astype(str).str.strip()
+    best = pd.Series(pd.NaT, index=s.index)
+    best_hits = 0
+    for fmt in ["%b %d, %Y", "%B %d, %Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y",
+                "%d.%m.%Y", "%d %b %Y", "%Y-%m-%dT%H:%M:%S"]:
+        parsed = pd.to_datetime(s, format=fmt, errors="coerce")
+        if parsed.notna().sum() > best_hits:
+            best, best_hits = parsed, parsed.notna().sum()
+    if best_hits < len(s) * 0.5:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            parsed = pd.to_datetime(s, errors="coerce")
+        if parsed.notna().sum() > best_hits:
+            best = parsed
+    return best.dt.normalize()
 
 
 def get_team_names(season):
-    """Full team names per game, taken from the season schedule.
-    Returns columns: Season, Gamecode, home_name, away_name (empty if unavailable)."""
+    """Season schedule: full team names, round, date, start time, played or not.
+    Returns SCHEDULE_COLS (an empty table if the schedule is unavailable)."""
     try:
         sched = BoxScoreData(COMPETITION).get_gamecodes_season(season)
         home = _pick(sched, ["hometeam", "home_team"])
@@ -293,23 +315,86 @@ def get_team_names(season):
         if home is None or away is None:
             print(f"  note: no team-name columns in the season {season} schedule "
                   f"(columns: {list(sched.columns)})")
-            return pd.DataFrame(columns=NAME_COLS)
-        out = pd.DataFrame({"Season": season,
-                            "Gamecode": sched["gameCode"].astype(int),
-                            "home_name": sched[home].astype(str).str.strip(),
-                            "away_name": sched[away].astype(str).str.strip(),
-                            "Round": (pd.to_numeric(sched["Round"], errors="coerce")
-                                      if "Round" in sched.columns else np.nan)})
+            return pd.DataFrame(columns=SCHEDULE_COLS)
+
+        # The library's own 'played' flag is unreliable: a game with a score has been played.
+        if {"homescore", "awayscore"}.issubset(sched.columns):
+            played = (sched["homescore"] + sched["awayscore"]) > 0
+        else:
+            played = sched["played"].astype(bool)
+
+        date_col = _pick(sched, ["date", "gamedate"])
+        time_col = _pick(sched, ["startime", "starttime", "start_time", "time"])
+        if date_col is None:
+            print(f"  note: no date column in the season {season} schedule "
+                  f"(columns: {list(sched.columns)})")
+        if date_col is not None:
+            ok_share = _parse_dates(sched[date_col]).notna().mean()
+            if ok_share < 0.9:
+                print(f"  note: only {ok_share:.0%} of the schedule dates could be read; "
+                      f"examples: {list(sched[date_col].astype(str).head(3))}")
+        flags = [c for c in (_pick(sched, ["confirmedDate"]), _pick(sched, ["confirmedTime"])) if c]
+        confirmed = pd.Series(True, index=sched.index)
+        for c in flags:
+            confirmed &= sched[c].astype(str).str.lower().eq("true")
+
+        out = pd.DataFrame({
+            "Season": season,
+            "Gamecode": sched["gameCode"].astype(int),
+            "home_name": sched[home].astype(str).str.strip(),
+            "away_name": sched[away].astype(str).str.strip(),
+            "Round": (pd.to_numeric(sched["Round"], errors="coerce")
+                      if "Round" in sched.columns else np.nan),
+            "date": _parse_dates(sched[date_col]) if date_col else pd.NaT,
+            "time": (sched[time_col].astype(str).str.extract(r"(\d{1,2}:\d{2})")[0]
+                     if time_col else None),
+            "confirmed": confirmed,
+            "played": played,
+        })
         return out.drop_duplicates(["Season", "Gamecode"])
-    except Exception as exc:                      # names are cosmetic: never stop the run
-        print(f"  note: could not fetch team names for season {season}: {exc}")
-        return pd.DataFrame(columns=NAME_COLS)
+    except Exception as exc:                      # the schedule is optional: never stop the run
+        print(f"  note: could not fetch the schedule for season {season}: {exc}")
+        return pd.DataFrame(columns=SCHEDULE_COLS)
+
+
+def find_upcoming(schedule):
+    """The next round still to be played and its unplayed games, or None.
+    'Next' = the round of the earliest unplayed game dated from yesterday on (so a
+    postponed old game that is rescheduled far ahead does not count as the next round)."""
+    if schedule is None or schedule.empty:
+        return None
+    sch = schedule[schedule["Season"] == schedule["Season"].max()]
+    todo = sch[~sch["played"].astype(bool)].copy()
+    if todo.empty:
+        return None
+    todo["date"] = pd.to_datetime(todo["date"], errors="coerce")
+    cutoff = pd.Timestamp.now().normalize() - pd.Timedelta(days=1)
+    future = todo[todo["date"] >= cutoff]
+    if future.empty:
+        future = todo
+    first = (future.sort_values(["date", "Round"], na_position="last").iloc[0]
+             if future["date"].notna().any() else future.sort_values("Round").iloc[0])
+    rnd = first["Round"]
+    games = todo[todo["Round"] == rnd] if pd.notna(rnd) else todo.head(0)
+    if games.empty:
+        return None
+    games = games.sort_values(["date", "time"], na_position="last")
+    out = []
+    for _, g in games.iterrows():
+        out.append({
+            "date": g["date"].strftime("%Y-%m-%d") if pd.notna(g["date"]) else None,
+            "time": g["time"] if isinstance(g["time"], str) else None,
+            "home": TEAM_NAME_OVERRIDES.get(g["home_name"], g["home_name"]),
+            "away": TEAM_NAME_OVERRIDES.get(g["away_name"], g["away_name"]),
+            "confirmed": bool(g["confirmed"]),
+        })
+    return {"round": int(rnd), "games": out}
 
 
 def apply_full_names(df, names):
     """Replace the short team labels by the full names from the schedule."""
     if names is not None and not names.empty:
-        d = df.merge(names, on=["Season", "Gamecode"], how="left")
+        d = df.merge(names[NAME_COLS], on=["Season", "Gamecode"], how="left")
         home = d["Home"] == 1
         full = np.where(home, d["home_name"], d["away_name"])
         opp = np.where(home, d["away_name"], d["home_name"])
@@ -494,10 +579,13 @@ def build_dvp(df):
     d = df[df["Position"].isin(POSITIONS)].rename(columns={"opp_team": "Team"})
 
     # Step 1: one row per (game, defending team, position)
-    pg = (d.groupby(["Season", "Gamecode", "Team", "Position"])
-          .agg(pir_game_avg=("pir", "mean"), n_players=("pir", "size"),
+    agg = dict(pir_game_avg=("pir", "mean"), n_players=("pir", "size"),
                pir_total=("pir", "sum"), min_total=("minutes", "sum"))
-          .reset_index())
+    if "Round" in d.columns:
+        agg["Round"] = ("Round", "first")            # constant within a game
+    pg = d.groupby(["Season", "Gamecode", "Team", "Position"]).agg(**agg).reset_index()
+    if "Round" not in pg.columns:
+        pg["Round"] = np.nan
 
     metrics = ["PIR_avg", "PIR_per36"]
     results = {}
@@ -538,6 +626,7 @@ def build_dvp(df):
                           .rename_axis("Team").reset_index().rename(columns={"Team": "team"})
                           .rename(columns={"Appearances": "n", "PIR_avg": "avg", "PIR_per36": "per36",
                                            "PIR_avg_vs_lg%": "avg_vs", "PIR_per36_vs_lg%": "per36_vs"}))
+    results["games"] = pg                  # one row per game, team and position (for the web filters)
     return results
 
 
@@ -629,27 +718,39 @@ HTML_TEMPLATE = r"""<!doctype html>
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);
   font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-.wrap{max-width:980px;margin:0 auto;padding:24px 16px 48px}
+.wrap{max-width:1040px;margin:0 auto;padding:24px 16px 48px}
 h1{font-size:22px;margin:0 0 4px;letter-spacing:-.01em}
 .sub{color:var(--ink2);margin:0 0 16px}
-.how{color:var(--ink2);margin:0 0 18px;max-width:70ch}
-.controls{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;margin:0 0 12px}
+.how{color:var(--ink2);margin:0 0 18px;max-width:72ch}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:0 0 14px}
+.row{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center}
+.row:not([hidden]) ~ .row:not([hidden]){margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
+.row[hidden]{display:none}
+.row>b{color:var(--ink2);font-weight:600;margin-right:2px}
+.info{color:var(--ink2);font-size:13px}
+select,input[type=search]{border:1px solid var(--line);background:var(--bg);color:var(--ink);
+  border-radius:8px;padding:7px 9px;font:inherit}
+input[type=search]{min-width:180px;background:var(--surface)}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--surface)}
 .seg button{border:0;background:transparent;color:var(--ink2);padding:8px 12px;font:inherit;cursor:pointer}
 .seg button+button{border-left:1px solid var(--line)}
 .seg button[aria-pressed="true"]{background:var(--accent);color:#fff}
-.seg button:focus-visible,input:focus-visible,th button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-input[type=search]{border:1px solid var(--line);background:var(--surface);color:var(--ink);
-  border-radius:8px;padding:8px 10px;font:inherit;min-width:180px}
-.legend{display:flex;align-items:center;gap:8px;color:var(--ink2);font-size:13px;margin:0 0 10px}
+.chip{border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:999px;
+  padding:6px 12px;font:inherit;cursor:pointer}
+.chip[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
+.chip.quiet{color:var(--ink2);border-style:dashed}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.legend{display:flex;flex-wrap:wrap;align-items:center;gap:8px;color:var(--ink2);font-size:13px;margin:0 0 10px}
 .bar{height:10px;width:160px;border-radius:5px;border:1px solid var(--line);
   background:linear-gradient(90deg,
     color-mix(in srgb,var(--cool) 55%,var(--mid)),var(--mid),color-mix(in srgb,var(--warm) 55%,var(--mid)))}
+.controls{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;margin:0 0 12px}
 .tablewrap{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:10px}
-table{border-collapse:separate;border-spacing:0;width:100%;min-width:640px}
+table{border-collapse:separate;border-spacing:0;width:100%;min-width:720px}
 th,td{padding:8px 10px;text-align:center;border-bottom:1px solid var(--line)}
 th{font-weight:600;color:var(--ink2);background:var(--surface);position:sticky;top:0}
 th button{all:unset;cursor:pointer;display:inline-block;padding:2px 4px}
+th button:focus-visible{outline:2px solid var(--accent)}
 th:first-child,td:first-child{text-align:left;position:sticky;left:0;background:var(--surface);z-index:1;min-width:190px}
 tr:last-child td{border-bottom:0}
 td.v{font-variant-numeric:tabular-nums}
@@ -657,15 +758,26 @@ td.v b{display:block;font-size:16px;font-weight:600}
 td.v small{display:block;color:var(--ink2);font-size:12px;white-space:nowrap}
 td.thin{opacity:.6}
 td.all{border-left:2px solid var(--line)}
+td.next{text-align:left;min-width:150px;font-size:13px;line-height:1.35}
+td.next small{display:block;color:var(--ink2)}
+th.nextcol{text-align:left}
+td.empty{color:var(--muted);padding:18px}
+.mnext{display:none}
+@media (max-width:640px){
+  th.nextcol,td.next{display:none}
+  .mnext{display:block;font-size:12px;color:var(--ink2);font-weight:400}
+  th:first-child,td:first-child{min-width:150px}
+  table{min-width:520px}
+}
 summary{cursor:pointer;color:var(--ink2);font-weight:600;margin:0 0 10px}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;margin:0 0 20px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:12px;margin:0 0 20px}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
 .card h3{margin:0 0 6px;font-size:14px;color:var(--ink2);font-weight:600}
-.card ol{margin:0;padding-left:20px}
-.card li{display:flex;justify-content:space-between;gap:8px}
-.card li span:last-child{font-variant-numeric:tabular-nums;color:var(--ink2)}
+.card ol{margin:0;padding-left:0;list-style:none}
+.card li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 12px;padding:2px 0}
+.card li span:last-child{font-variant-numeric:tabular-nums;color:var(--ink2);white-space:nowrap}
 .card p{margin:0;color:var(--muted);font-size:13px}
-.note{color:var(--ink2);font-size:13px;max-width:78ch}
+.note{color:var(--ink2);font-size:13px;max-width:80ch}
 footer{margin-top:20px;color:var(--muted);font-size:13px}
 </style>
 </head>
@@ -675,7 +787,24 @@ footer{margin-top:20px;color:var(--muted);font-size:13px}
   <p class="sub" id="meta"></p>
   <p class="how">Each cell shows the average PIR that opposing <b>guards, forwards and centers</b> produce
   <b>against</b> that team. <b>Red = more than the league average (softer defense), blue = less (tougher).</b>
-  Click a column title to sort.</p>
+  Use the filters to look at specific rounds or at the teams playing on a given day.</p>
+
+  <div class="panel" id="filters">
+    <div class="row" id="seasonrow" hidden>
+      <b>Season</b><select id="season" aria-label="Season"></select>
+    </div>
+    <div class="row" id="roundrow">
+      <b>Rounds</b>
+      <label class="info" for="rfrom">from</label><select id="rfrom"></select>
+      <label class="info" for="rto">to</label><select id="rto"></select>
+      <div class="seg" id="presets" role="group" aria-label="Round presets">
+        <button data-p="all">All</button><button data-p="last5">Last 5</button>
+        <button data-p="last3">Last 3</button><button data-p="latest">Latest round</button>
+      </div>
+      <span class="info" id="rinfo"></span>
+    </div>
+    <div class="row" id="dayrow" hidden></div>
+  </div>
 
   <details id="cardsbox" open>
     <summary>Softest and toughest teams by position</summary>
@@ -689,9 +818,10 @@ footer{margin-top:20px;color:var(--muted);font-size:13px}
       <button data-m="vs" aria-pressed="false">vs league %</button>
     </div>
     <input type="search" id="q" placeholder="Filter teams" aria-label="Filter teams">
+    <span class="info" id="tinfo"></span>
   </div>
   <div class="legend"><span>Tougher</span><span class="bar"></span><span>Softer</span>
-    <span>· faded cells = few games so far (†)</span></div>
+    <span>· faded cells = few games in the selection (†)</span></div>
   <div class="tablewrap"><table id="tbl"></table></div>
   <noscript><p>This page needs JavaScript to draw the table.</p></noscript>
 
@@ -701,20 +831,105 @@ footer{margin-top:20px;color:var(--muted);font-size:13px}
 <script id="data" type="application/json">__DATA__</script>
 <script>
 const D = JSON.parse(document.getElementById("data").textContent);
-const POS = D.positions, MIN_N = D.min_n;
-const cell = {}, over = {};
-D.rows.forEach(r => { (cell[r.team] = cell[r.team] || {})[r.pos] = r; });
-D.overall.forEach(r => { over[r.team] = r; });
-const TEAMS = Object.keys(over).sort();
-const METRICS = {
-  avg:  {val: r => r.avg,    vs: r => r.avg_vs,   fmt: v => v.toFixed(1)},
-  per36:{val: r => r.per36,  vs: r => r.per36_vs, fmt: v => v.toFixed(1)},
-  vs:   {val: r => r.avg_vs, vs: r => r.avg_vs,   fmt: v => (v > 0 ? "+" : "") + v.toFixed(1) + "%"}
-};
+const POS = D.positions, MIN_N = D.min_n, G = D.games, U = D.upcoming;
+const $ = id => document.getElementById(id);
 const signed = v => v == null ? "–" : (v > 0 ? "+" : "") + v.toFixed(1) + "%";
-let metric = "avg", sortKey = "All", sortDir = -1, query = "";
+const fmtDay = iso => iso ? new Date(iso + "T12:00:00").toLocaleDateString([], {weekday: "short", day: "numeric", month: "short"}) : "Date TBC";
 
-function entry(team, key) { return key === "All" ? over[team] : (cell[team] || {})[key]; }
+const ALL_TEAMS = Array.from(new Set(G.map(x => x.team))).sort();
+const SEASONS = D.seasons;
+let season = SEASONS.length ? SEASONS[SEASONS.length - 1] : "all";   // "all" = every season
+let rFrom = null, rTo = null;                                         // null = first / last round
+let metric = "avg", sortKey = "All", sortDir = -1, query = "";
+const selDays = new Set();
+
+// ---- next-round information ------------------------------------------------
+const NEXT = {};
+if (U) U.games.forEach(g => {
+  NEXT[g.home] = {date: g.date, time: g.time, opp: g.away, home: true, tbc: !g.confirmed};
+  NEXT[g.away] = {date: g.date, time: g.time, opp: g.home, home: false, tbc: !g.confirmed};
+});
+const hasNext = ALL_TEAMS.some(t => NEXT[t]);
+
+// ---- rounds ----------------------------------------------------------------
+function seasonRows() { return G.filter(x => season === "all" || x.s === season); }
+function roundList() {
+  if (season === "all") return [];
+  const set = new Set(); seasonRows().forEach(x => { if (x.r != null) set.add(x.r); });
+  return Array.from(set).sort((a, b) => a - b);
+}
+function range() {
+  const rl = roundList(); if (!rl.length) return null;
+  return [rFrom == null ? rl[0] : rFrom, rTo == null ? rl[rl.length - 1] : rTo];
+}
+function selectedRows() {
+  const rg = range();
+  return seasonRows().filter(x => !rg || (x.r != null && x.r >= rg[0] && x.r <= rg[1]));
+}
+function applyPreset(p) {
+  const rl = roundList(); if (!rl.length) return;
+  const last = rl[rl.length - 1];
+  if (p === "all") { rFrom = null; rTo = null; }
+  else if (p === "latest") { rFrom = last; rTo = last; }
+  else { const k = p === "last5" ? 5 : 3; rFrom = rl[Math.max(0, rl.length - k)]; rTo = last; }
+}
+function drawRoundControls() {
+  const rl = roundList(), row = $("roundrow");
+  row.hidden = rl.length === 0;
+  if (!rl.length) return;
+  const rg = range();
+  [["rfrom", rg[0]], ["rto", rg[1]]].forEach(([id, val]) => {
+    const sel = $(id); sel.innerHTML = "";
+    rl.forEach(r => { const o = document.createElement("option"); o.value = r; o.textContent = "Round " + r; sel.appendChild(o); });
+    sel.value = String(val);
+  });
+  const last = rl[rl.length - 1];
+  const match = {
+    all: rg[0] === rl[0] && rg[1] === last,
+    latest: rg[0] === last && rg[1] === last,
+    last5: rg[0] === rl[Math.max(0, rl.length - 5)] && rg[1] === last && rl.length > 5,
+    last3: rg[0] === rl[Math.max(0, rl.length - 3)] && rg[1] === last && rl.length > 3
+  };
+  document.querySelectorAll("#presets button").forEach(b => b.setAttribute("aria-pressed", String(!!match[b.dataset.p])));
+}
+
+// ---- the numbers -----------------------------------------------------------
+// Same method as the Python script: per game, average PIR of the opposing players of a
+// position; then average those game values. Everything is recomputed for the selection.
+function build(rows) {
+  const mk = () => ({games: 0, n: 0, sum: 0, pir: 0, min: 0});
+  const bump = (o, r) => { o.games++; o.n += r.n; o.sum += r.avg; o.pir += r.pir; o.min += r.min; };
+  const T = {}, L = {}, LA = mk();
+  rows.forEach(r => {
+    const t = T[r.team] || (T[r.team] = {pos: {}, all: mk()});
+    bump(t.pos[r.pos] || (t.pos[r.pos] = mk()), r); bump(t.all, r);
+    bump(L[r.pos] || (L[r.pos] = mk()), r); bump(LA, r);
+  });
+  const p36 = o => o.min > 0 ? o.pir / o.min * 36 : null;
+  const E = {};
+  Object.keys(T).forEach(team => {
+    E[team] = {};
+    POS.forEach(p => {
+      const o = T[team].pos[p], l = L[p]; if (!o || !l) return;
+      const avg = o.sum / o.games, lgA = l.sum / l.games, a36 = p36(o), l36 = p36(l);
+      E[team][p] = {games: o.games, n: o.n, avg: avg, per36: a36, rank: null,
+        avg_vs: lgA ? (avg / lgA - 1) * 100 : null,
+        per36_vs: (a36 != null && l36) ? (a36 / l36 - 1) * 100 : null};
+    });
+    const a = T[team].all, avgA = a.n ? a.pir / a.n : null, lgAll = LA.n ? LA.pir / LA.n : null, a36 = p36(a), l36 = p36(LA);
+    E[team].All = {games: null, n: a.n, avg: avgA, per36: a36, rank: null,
+      avg_vs: (avgA != null && lgAll) ? (avgA / lgAll - 1) * 100 : null,
+      per36_vs: (a36 != null && l36) ? (a36 / l36 - 1) * 100 : null};
+  });
+  POS.forEach(p => {
+    const vals = Object.keys(E).filter(t => E[t][p] && E[t][p].avg != null).map(t => E[t][p].avg);
+    Object.keys(E).forEach(t => { const e = E[t][p]; if (e && e.avg != null) e.rank = 1 + vals.filter(v => v < e.avg).length; });
+  });
+  return E;
+}
+let E = {}, SEL = [];
+function recompute() { SEL = selectedRows(); E = build(SEL); }
+function entry(team, key) { return (E[team] || {})[key]; }
 
 function tint(vsPct) {
   if (vsPct == null) return "";
@@ -723,16 +938,41 @@ function tint(vsPct) {
   return "color-mix(in srgb," + pole + " " + k + "%,var(--mid))";
 }
 
+// ---- next-round day chips --------------------------------------------------
+function drawDays() {
+  const row = $("dayrow"); row.innerHTML = "";
+  if (!U || !U.games.length || !hasNext) { row.hidden = true; return; }
+  row.hidden = false;
+  const lab = document.createElement("b");
+  lab.textContent = "Next round" + (U.round != null ? " (round " + U.round + ")" : "") + " – teams playing on";
+  row.appendChild(lab);
+  const days = {};
+  U.games.forEach(g => { const k = g.date || "tbc"; days[k] = (days[k] || 0) + 2; });
+  Object.keys(days).sort().forEach(k => {
+    const b = document.createElement("button"); b.className = "chip";
+    b.textContent = fmtDay(k === "tbc" ? null : k) + " · " + days[k] + " teams";
+    b.setAttribute("aria-pressed", String(selDays.has(k)));
+    b.onclick = () => { if (selDays.has(k)) selDays.delete(k); else selDays.add(k); drawDays(); drawTable(); };
+    row.appendChild(b);
+  });
+  if (selDays.size) {
+    const c = document.createElement("button"); c.className = "chip quiet"; c.textContent = "Show all teams";
+    c.onclick = () => { selDays.clear(); drawDays(); drawTable(); };
+    row.appendChild(c);
+  }
+}
+
+// ---- cards -----------------------------------------------------------------
 function drawCards() {
-  const host = document.getElementById("cards"); host.innerHTML = "";
+  const host = $("cards"); host.innerHTML = "";
   POS.forEach(pos => {
-    const rows = D.rows.filter(r => r.pos === pos && r.n >= MIN_N && r.avg != null)
-                       .sort((a, b) => b.avg - a.avg);
+    const rows = Object.keys(E).map(t => ({team: t, e: E[t][pos]}))
+      .filter(x => x.e && x.e.n >= MIN_N && x.e.avg != null).sort((a, b) => b.e.avg - a.e.avg);
     const card = document.createElement("div"); card.className = "card";
     const h = document.createElement("h3"); h.textContent = pos + "s: softest / toughest"; card.appendChild(h);
     if (rows.length < 6) {
       const p = document.createElement("p");
-      p.textContent = "Not enough games yet (needs " + MIN_N + "+ player-games per team).";
+      p.textContent = "Not enough games in this selection (needs " + MIN_N + "+ player-games per team).";
       card.appendChild(p);
     } else {
       [["Softest", rows.slice(0, 3)], ["Toughest", rows.slice(-3).reverse()]].forEach(([lab, list]) => {
@@ -741,7 +981,7 @@ function drawCards() {
         list.forEach(r => {
           const li = document.createElement("li");
           const a = document.createElement("span"); a.textContent = r.team;
-          const b = document.createElement("span"); b.textContent = r.avg.toFixed(1) + " (" + signed(r.avg_vs) + ")";
+          const b = document.createElement("span"); b.textContent = r.e.avg.toFixed(1) + " (" + signed(r.e.avg_vs) + ")";
           li.append(a, b); ol.appendChild(li);
         });
         card.appendChild(ol);
@@ -751,34 +991,64 @@ function drawCards() {
   });
 }
 
+// ---- table -----------------------------------------------------------------
+const METRICS = {
+  avg:   {val: e => e.avg,    vs: e => e.avg_vs,   fmt: v => v.toFixed(1)},
+  per36: {val: e => e.per36,  vs: e => e.per36_vs, fmt: v => v.toFixed(1)},
+  vs:    {val: e => e.avg_vs, vs: e => e.avg_vs,   fmt: v => (v > 0 ? "+" : "") + v.toFixed(1) + "%"}
+};
+function nextText(t) {
+  const x = NEXT[t]; if (!x) return null;
+  return {when: fmtDay(x.date) + (x.time ? " · " + x.time : "") + (x.tbc ? " (TBC)" : ""),
+          vs: (x.home ? "vs " : "at ") + x.opp, key: (x.date || "9999") + " " + (x.time || "")};
+}
 function drawTable() {
-  const m = METRICS[metric], tbl = document.getElementById("tbl");
+  const m = METRICS[metric], tbl = $("tbl");
   tbl.innerHTML = "";
-  const cols = [["Team", "Team"]].concat(POS.map(p => [p, p]), [["All positions", "All"]]);
+  const cols = [["Team", "Team"]];
+  if (hasNext) cols.push(["Next game", "Next"]);
+  POS.forEach(p => cols.push([p, p])); cols.push(["All positions", "All"]);
   const thead = tbl.createTHead().insertRow();
   cols.forEach(([label, key]) => {
     const th = document.createElement("th");
+    if (key === "Next") th.className = "nextcol";
     th.setAttribute("aria-sort", key === sortKey ? (sortDir > 0 ? "ascending" : "descending") : "none");
     const b = document.createElement("button");
     b.textContent = label + (key === sortKey ? (sortDir > 0 ? " ▲" : " ▼") : "");
-    b.onclick = () => { if (sortKey === key) sortDir = -sortDir; else { sortKey = key; sortDir = key === "Team" ? 1 : -1; } drawTable(); };
+    b.onclick = () => {
+      if (sortKey === key) sortDir = -sortDir; else { sortKey = key; sortDir = (key === "Team" || key === "Next") ? 1 : -1; }
+      drawTable();
+    };
     th.appendChild(b); thead.appendChild(th);
   });
   const sortVal = t => {
     if (sortKey === "Team") return t;
-    const e = entry(t, sortKey); const v = e ? m.val(e) : null;
-    return v == null ? null : v;
+    if (sortKey === "Next") { const n = nextText(t); return n ? n.key : null; }
+    const e = entry(t, sortKey); return e ? m.val(e) : null;
   };
-  const list = TEAMS.filter(t => t.toLowerCase().includes(query.toLowerCase()));
+  let list = ALL_TEAMS.filter(t => t.toLowerCase().indexOf(query.toLowerCase()) >= 0);
+  if (selDays.size) list = list.filter(t => NEXT[t] && selDays.has(NEXT[t].date || "tbc"));
   list.sort((a, b) => {
     const x = sortVal(a), y = sortVal(b);
     if (x == null && y == null) return 0; if (x == null) return 1; if (y == null) return -1;
     return (x < y ? -1 : x > y ? 1 : 0) * sortDir;
   });
+  $("tinfo").textContent = list.length + " of " + ALL_TEAMS.length + " teams";
   const tbody = tbl.createTBody();
+  if (!list.length) {
+    const td = tbody.insertRow().insertCell(); td.colSpan = cols.length; td.className = "empty";
+    td.textContent = "No teams match the current filters."; return;
+  }
   list.forEach(team => {
     const tr = tbody.insertRow();
-    tr.insertCell().textContent = team;
+    const nm = tr.insertCell(); nm.textContent = team;
+    const nx = nextText(team);
+    if (nx) { const ms = document.createElement("small"); ms.className = "mnext"; ms.textContent = nx.when + " · " + nx.vs; nm.appendChild(ms); }
+    if (hasNext) {
+      const td = tr.insertCell(); td.className = "next"; const n = nextText(team);
+      if (!n) td.textContent = "–";
+      else { td.textContent = n.when; const s = document.createElement("small"); s.textContent = n.vs; td.appendChild(s); }
+    }
     POS.concat(["All"]).forEach(key => {
       const td = tr.insertCell(); td.className = "v" + (key === "All" ? " all" : "");
       const e = entry(team, key);
@@ -787,8 +1057,7 @@ function drawTable() {
       td.style.background = tint(m.vs(e));
       const b = document.createElement("b"); b.textContent = m.fmt(m.val(e)) + (thin ? " †" : "");
       const s = document.createElement("small");
-      s.textContent = metric === "vs" ? e.avg.toFixed(1) + " PIR · n " + e.n
-                                      : "n " + e.n + " · " + signed(m.vs(e));
+      s.textContent = metric === "vs" ? e.avg.toFixed(1) + " PIR · n " + e.n : "n " + e.n + " · " + signed(m.vs(e));
       td.append(b, s);
       td.title = team + " vs " + (key === "All" ? "all positions" : key + "s") +
         "\nAvg PIR " + (e.avg == null ? "–" : e.avg.toFixed(2)) +
@@ -799,44 +1068,70 @@ function drawTable() {
   });
 }
 
-document.getElementById("meta").textContent =
-  D.meta.season_label + " · " + D.meta.games + " games" +
+// ---- page text + wiring ----------------------------------------------------
+function drawInfo() {
+  const rg = range(), games = new Set(SEL.map(x => x.s + "-" + x.g)).size;
+  $("rinfo").textContent = (rg ? (rg[0] === rg[1] ? "Round " + rg[0] : "Rounds " + rg[0] + "–" + rg[1]) : "All games") +
+    " · " + games + " game" + (games === 1 ? "" : "s");
+}
+function redraw(withControls) {
+  recompute(); if (withControls) drawRoundControls();
+  drawInfo(); drawCards(); drawTable();
+}
+$("meta").textContent =
+  D.meta.season_label + " · " + D.meta.games + " games played" +
   (D.meta.latest_round ? " · through round " + D.meta.latest_round : "") +
   " · updated " + new Date(D.meta.updated_iso).toLocaleString([], {dateStyle: "medium", timeStyle: "short"});
-document.getElementById("explain").textContent =
-  "n = player-games behind the number; † = fewer than " + MIN_N + " (about 30+ is a comfortable base). " +
-  "Avg PIR: in every game the PIR of the opposing players of that position who played is averaged, " +
-  "then those game values are averaged, so each game counts once. PIR per 36 min weights players by " +
-  "minutes played. “vs league %” compares with the league average for that position. " +
-  "The opponent's own strength is not adjusted for.";
-document.getElementById("foot").textContent =
+$("explain").textContent =
+  "n = player-games behind the number; † = fewer than " + MIN_N + " (about 30+ is a comfortable base, so short round " +
+  "selections are naturally faded). Avg PIR: in every game the PIR of the opposing players of that position who played is " +
+  "averaged, then those game values are averaged, so each game counts once. PIR per 36 min weights players by minutes " +
+  "played. “vs league %” compares with the league average for that position in the same selection of rounds. " +
+  "The opponent's own strength is not adjusted for. Dates and times are as listed in the Euroleague schedule.";
+$("foot").textContent =
   "Positions come from a fantasy player list" +
   (D.meta.inferred_pct > 0 ? "; " + D.meta.inferred_pct.toFixed(1) + "% of minutes are from players whose position was estimated from their stats" : "") +
   (D.meta.none_pct > 0 ? "; " + D.meta.none_pct.toFixed(1) + "% of minutes are from players without a position and are left out" : "") + ".";
+
+if (SEASONS.length > 1) {
+  $("seasonrow").hidden = false;
+  const sel = $("season");
+  SEASONS.forEach(s => { const o = document.createElement("option"); o.value = s; o.textContent = s + "-" + String(s + 1).slice(-2); sel.appendChild(o); });
+  const all = document.createElement("option"); all.value = "all"; all.textContent = "All seasons"; sel.appendChild(all);
+  sel.value = String(season);
+  sel.onchange = () => { season = sel.value === "all" ? "all" : +sel.value; rFrom = null; rTo = null; redraw(true); };
+}
+$("rfrom").onchange = e => { rFrom = +e.target.value; const hi = range()[1]; if (rFrom > hi) rTo = rFrom; redraw(true); };
+$("rto").onchange = e => { rTo = +e.target.value; const lo = range()[0]; if (rTo < lo) rFrom = rTo; redraw(true); };
+document.querySelectorAll("#presets button").forEach(b => b.onclick = () => { applyPreset(b.dataset.p); redraw(true); });
 document.querySelectorAll("#metric button").forEach(b => b.onclick = () => {
   metric = b.dataset.m;
-  document.querySelectorAll("#metric button").forEach(x => x.setAttribute("aria-pressed", x === b));
+  document.querySelectorAll("#metric button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
   drawTable();
 });
-document.getElementById("q").oninput = e => { query = e.target.value; drawTable(); };
-if (window.innerWidth < 640) document.getElementById("cardsbox").open = false;
-drawCards(); drawTable();
+$("q").oninput = e => { query = e.target.value; drawTable(); };
+if (window.innerWidth < 640) $("cardsbox").open = false;
+drawDays(); redraw(true);
 </script>
 </body>
 </html>
 """
 
 
-def write_html(df, dvp):
-    """Write OUTPUT_DIR/index.html from the finished tables."""
+def write_html(df, dvp, schedule=None):
+    """Write OUTPUT_DIR/index.html. The page receives one row per game / team / position and
+    calculates every table itself, so its round and day filters can recalculate everything."""
     import json
     from datetime import datetime, timezone
 
-    ren = {"Team": "team", "Position": "pos", "Games": "games", "Appearances": "n",
-           "PIR_avg": "avg", "PIR_per36": "per36", "PIR_avg_vs_lg%": "avg_vs",
-           "PIR_per36_vs_lg%": "per36_vs", "PIR_rank": "rank"}
-    rows = json.loads(dvp["all_seasons"][list(ren)].rename(columns=ren).to_json(orient="records"))
-    overall = json.loads(dvp["overall"].to_json(orient="records"))
+    pg = dvp["games"].copy()
+    pg["Round"] = pd.to_numeric(pg["Round"], errors="coerce")
+    games = pg.rename(columns={"Season": "s", "Gamecode": "g", "Round": "r", "Team": "team",
+                               "Position": "pos", "pir_game_avg": "avg", "n_players": "n",
+                               "pir_total": "pir", "min_total": "min"})
+    games = games[["s", "g", "r", "team", "pos", "avg", "n", "pir", "min"]]
+    games = games.assign(avg=games["avg"].round(4), pir=games["pir"].round(3), min=games["min"].round(3))
+    games_json = json.loads(games.to_json(orient="records"))
 
     cov = df.groupby("PosSource")["minutes"].sum()
     total = cov.sum() or 1.0
@@ -847,7 +1142,8 @@ def write_html(df, dvp):
         latest_round = int(df["Round"].max())
 
     payload = {
-        "positions": POSITIONS, "min_n": 15, "rows": rows, "overall": overall,
+        "positions": POSITIONS, "min_n": 15, "seasons": seasons, "games": games_json,
+        "upcoming": find_upcoming(schedule),
         "meta": {
             "season_label": f"Euroleague {label}",
             "games": int(df[["Season", "Gamecode"]].drop_duplicates().shape[0]),
@@ -857,6 +1153,12 @@ def write_html(df, dvp):
             "none_pct": round(float(cov.get("none", 0.0)) / total * 100, 1),
         },
     }
+    up = payload["upcoming"]
+    if up:
+        days = sorted({g["date"] or "date TBC" for g in up["games"]})
+        print(f"Next round: {up['round']} ({len(up['games'])} games on {', '.join(days)})")
+    else:
+        print("Next round: none found in the schedule")
     blob = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     path = os.path.join(OUTPUT_DIR, "index.html")
@@ -910,7 +1212,7 @@ def main():
         lookup(dvp["all_seasons"], team_text, position)
 
     xlsx = save_all(df, players, dvp, piv)
-    html_path = write_html(df, dvp) if WRITE_HTML else None
+    html_path = write_html(df, dvp, names) if WRITE_HTML else None
     if html_path:
         print(f"Web page written: {html_path}  (open it in any browser)")
     try:
